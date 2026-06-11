@@ -19,7 +19,9 @@ my_zed_scene/
 │   └── poses_7d.txt        # debug: x y z qx qy qz qw
 ├── camera_info.json        # width, height, 3x3 intrinsics, distortion
 ├── timestamps.txt          # provenance/debug
-└── manifest.json           # capture settings and DAAAM command hint
+├── manifest.json           # capture settings and DAAAM command hint
+├── manifest.jsonl          # one per-frame audit record
+└── quality_report.json     # end-of-capture integrity and quality summary
 ```
 
 ## Install
@@ -37,6 +39,13 @@ Then install normal Python dependencies:
 
 ```bash
 python3 -m pip install -r requirements.txt
+```
+
+For the desktop UI, use the project virtual environment created with Python 3.12:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
 On macOS, run the local diagnostic first:
@@ -65,6 +74,45 @@ python3 scripts/capture_zed_to_daaam_dataset.py \
 This records about 60 seconds at 15 FPS if `--max-frames 900` is used.
 
 Stop anytime with `Ctrl+C`; the script will close files and write `manifest.json`.
+
+The CLI now writes the extra audit files `manifest.jsonl` and `quality_report.json`.
+Each saved frame has one aligned `frame_id` across RGB, depth, pose, timestamps, and per-frame metadata. If a required modality is missing, the frame is skipped rather than leaving mismatched numbering.
+
+Add `--record-svo` when you also want a replayable raw ZED recording:
+
+```bash
+python scripts/capture_zed_to_daaam_dataset.py \
+  --output-dir $HOME/datasets/zedm_daaam_room01 \
+  --max-frames 900 \
+  --record-svo \
+  --overwrite
+```
+
+This writes `raw.svo` inside the output directory when supported by the active ZED SDK configuration.
+
+## Capture with the desktop UI
+
+```bash
+source .venv/bin/activate
+python scripts/zed_capture_ui.py
+```
+
+If your current shell has not picked up the `video` and `zed` groups yet, launch with:
+
+```bash
+sg zed -c 'sg video -c ".venv/bin/python scripts/zed_capture_ui.py"'
+```
+
+The UI provides:
+
+- left and right camera preview
+- output directory and capture settings
+- open device, start capture, pause saving, resume saving, stop capture, restart device, close device
+- live FPS, saved frame count, tracking state, pose, and quality status
+- dataset validation from the selected output directory
+- optional raw SVO recording through the `Record Raw SVO` checkbox
+
+Pause keeps the camera preview running and stops only file saving. Resume continues writing into the same dataset directory.
 
 ## Validate the dataset
 
@@ -95,9 +143,14 @@ python scripts/run_pipeline.py $HOME/datasets/zedm_daaam_room01 \
 Notes:
 
 - Depth is saved as `.npy` float32 meters, so DAAAM uses `--depth-scale 1.0`.
+- `camera_info.json` records depth unit, timestamp source/unit, configured FPS, camera metadata, coordinate notes, and crop/resize geometry.
+- `timestamps.txt` stores real per-frame timestamps aligned to saved frame ids.
+- `manifest.jsonl` records per-frame paths, pose validity, ZED tracking state, pose confidence, pose reset flags, depth quality, RGB quality, and exposure/gain/white-balance when available.
+- `quality_report.json` summarizes count checks, timestamp monotonicity, pose reset boundaries, depth valid ratio, and RGB quality distributions.
 - The ZED SDK coordinate system is set to `IMAGE` by default: x right, y down, z forward. This matches the OpenCV-style projection used with `fx/fy/cx/cy` and depth images.
 - The pose written to `pose/poses.txt` is `world_T_left_camera`, one 4x4 matrix per RGB/depth frame. DAAAM converts this into `[x, y, z, qx, qy, qz, qw]` internally.
 - `--resize-mode crop_resize` center-crops then resizes, preserving aspect ratio. It also updates the saved intrinsics in `camera_info.json`.
+- The capture core computes adjacent pose deltas. Single-frame translation deltas over 0.20 m produce warnings; deltas over 0.25 m are marked as pose reset events and start a new `sequence_id` in `manifest.jsonl`.
 - If ZED tracking is unstable, frames are dropped by default. Disable this only for debugging:
 
 ```bash
@@ -123,4 +176,13 @@ Then validate:
 
 ```bash
 python3 scripts/validate_daaam_image_sequence.py $HOME/datasets/zedm_daaam_smoke01 --fps 10
+```
+
+## Developer verification
+
+```bash
+PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -v
+PYTHONPATH=src .venv/bin/python scripts/capture_zed_to_daaam_dataset.py --help
+PYTHONPATH=src .venv/bin/python scripts/validate_daaam_image_sequence.py --help
+PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -c "from daaam_zed.ui import MainWindow; print(MainWindow)"
 ```

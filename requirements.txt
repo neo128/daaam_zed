@@ -1,3 +1,5 @@
 numpy
 opencv-python
+PySide6
+pytest
 # pyzed is installed from the ZED SDK, not from this requirements file.
