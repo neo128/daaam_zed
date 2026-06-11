@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local capture outputs can be large and should be kept outside git.
+datasets/
+output/
