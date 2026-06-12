@@ -222,11 +222,12 @@ class ZedCamera:
         self.zed.retrieve_image(self.right_mat, self.sl.VIEW.RIGHT)
         self.zed.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
 
-        left_bgra = np.asarray(self.left_mat.get_data())
-        right_bgra = np.asarray(self.right_mat.get_data())
-        depth_m = np.asarray(self.depth_mat.get_data())
-        if depth_m.ndim == 3:
-            depth_m = depth_m[..., 0]
+        left_bgra = _sdk_mat_snapshot(self.left_mat.get_data())
+        right_bgra = _sdk_mat_snapshot(self.right_mat.get_data())
+        depth_raw = _sdk_mat_snapshot(self.depth_mat.get_data())
+        if depth_raw.ndim == 3:
+            depth_raw = depth_raw[..., 0]
+        depth_m = np.ascontiguousarray(depth_raw, dtype=np.float32)
         left_bgr = cv2.cvtColor(left_bgra, cv2.COLOR_BGRA2BGR)
         right_bgr = cv2.cvtColor(right_bgra, cv2.COLOR_BGRA2BGR)
         t, q = _pose_translation_orientation(self.pose, self.sl)
@@ -234,7 +235,7 @@ class ZedCamera:
         return CameraFrame(
             left_bgr=left_bgr,
             right_bgr=right_bgr,
-            depth_m=depth_m.astype(np.float32, copy=False),
+            depth_m=depth_m,
             world_T_left_camera=T,
             pose_7d=Pose7D(float(t[0]), float(t[1]), float(t[2]), float(q[0]), float(q[1]), float(q[2]), float(q[3])),
             timestamp=_timestamp_sec(self.zed, self.sl, self.pose),
@@ -269,6 +270,10 @@ class ZedCamera:
         if err != self.sl.ERROR_CODE.SUCCESS:
             raise RuntimeError(f"Failed to enable SVO recording: {err}")
         self._recording_enabled = True
+
+
+def _sdk_mat_snapshot(data: Any) -> np.ndarray:
+    return np.array(np.asarray(data), copy=True, order="C")
 
 
 def _enum_value(enum_cls: Any, name: str) -> Any:

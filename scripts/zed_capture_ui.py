@@ -11,6 +11,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from daaam_zed.qt_env import prepare_qt_environment  # noqa: E402
+
+prepare_qt_environment()
+
 from daaam_zed.ui import run_app  # noqa: E402
 
 

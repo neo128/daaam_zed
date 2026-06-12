@@ -6,10 +6,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+
+from .qt_env import prepare_qt_environment
+
+prepare_qt_environment()
+
+from PySide6.QtCore import QRect, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -23,11 +27,16 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+import cv2
+
+prepare_qt_environment()
 
 from .dataset_writer import DatasetWriter
 from .geometry import apply_crop_resize, compute_output_geometry, sanitize_depth
@@ -38,7 +47,7 @@ from .zed_capture import ZedCamera
 
 
 class CaptureWorker(QThread):
-    preview_frame = Signal(object, object)
+    preview_frame = Signal(object, object, object)
     status_changed = Signal(str)
     metrics_changed = Signal(dict)
     pose_changed = Signal(object)
@@ -188,7 +197,7 @@ class CaptureWorker(QThread):
             self.msleep(5)
             return
         self._grabbed += 1
-        self.preview_frame.emit(frame.left_bgr, frame.right_bgr)
+        self.preview_frame.emit(_preview_snapshot(frame.left_bgr), _preview_snapshot(frame.right_bgr), _preview_snapshot(frame.depth_m))
         self.pose_changed.emit(frame.pose_7d)
         if self._recording and not self._paused and self._writer is not None:
             self._save_frame(frame)
@@ -287,21 +296,77 @@ class CaptureWorker(QThread):
             self._camera_info = None
 
 
-class PreviewLabel(QLabel):
+def _preview_snapshot(image: Any) -> np.ndarray | None:
+    if image is None:
+        return None
+    return np.ascontiguousarray(np.asarray(image)).copy()
+
+
+def depth_to_bgr_preview(depth_m: np.ndarray, min_depth_m: float = 0.05, max_depth_m: float = 5.0) -> np.ndarray:
+    depth = np.asarray(depth_m, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = depth[..., 0]
+    valid = np.isfinite(depth) & (depth > min_depth_m)
+    normalized = np.zeros(depth.shape, dtype=np.uint8)
+    if max_depth_m <= min_depth_m:
+        max_depth_m = min_depth_m + 1.0
+    clipped = np.clip(depth, min_depth_m, max_depth_m)
+    normalized[valid] = (255.0 * (1.0 - (clipped[valid] - min_depth_m) / (max_depth_m - min_depth_m))).astype(np.uint8)
+    color = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
+    color[~valid] = 0
+    return color
+
+
+class PreviewLabel(QWidget):
     def __init__(self, text: str) -> None:
-        super().__init__(text)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        super().__init__()
+        self._placeholder = text
+        self._image: QImage | None = None
         self.setMinimumSize(320, 240)
-        self.setStyleSheet("background: #111; color: #ddd; border: 1px solid #444;")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setStyleSheet("background: #111; color: #ddd;")
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(320, 240)
+
+    def has_image(self) -> bool:
+        return self._image is not None and not self._image.isNull()
 
     def set_bgr_image(self, bgr: np.ndarray | None) -> None:
         if bgr is None:
-            self.setText("Unavailable")
+            self._placeholder = "Unavailable"
+            self._image = None
+            self.update()
             return
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         h, w, ch = rgb.shape
-        image = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
-        self.setPixmap(QPixmap.fromImage(image).scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self._image = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+        self.update()
+
+    def set_depth_image(self, depth_m: np.ndarray | None) -> None:
+        if depth_m is None:
+            self._placeholder = "Depth unavailable"
+            self._image = None
+            self.update()
+            return
+        self.set_bgr_image(depth_to_bgr_preview(depth_m))
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001, N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        if self._image is None or self._image.isNull():
+            painter.setPen(Qt.GlobalColor.lightGray)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._placeholder)
+            painter.setPen(Qt.GlobalColor.darkGray)
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+            return
+        scaled = self._image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        painter.drawImage(QRect(x, y, scaled.width(), scaled.height()), self._image)
+        painter.setPen(Qt.GlobalColor.darkGray)
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
 
 class MainWindow(QMainWindow):
@@ -333,12 +398,18 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
 
         preview_layout = QGridLayout()
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(8)
+        preview_layout.setColumnStretch(0, 1)
+        preview_layout.setColumnStretch(1, 1)
+        preview_layout.setRowStretch(0, 1)
+        preview_layout.setRowStretch(1, 1)
+        self.depth_preview = PreviewLabel("Depth")
         self.left_preview = PreviewLabel("Left Camera")
         self.right_preview = PreviewLabel("Right Camera")
-        preview_layout.addWidget(QLabel("Left"), 0, 0)
-        preview_layout.addWidget(QLabel("Right"), 0, 1)
-        preview_layout.addWidget(self.left_preview, 1, 0)
-        preview_layout.addWidget(self.right_preview, 1, 1)
+        preview_layout.addWidget(self._preview_panel("Depth", self.depth_preview), 0, 0, 1, 2)
+        preview_layout.addWidget(self._preview_panel("Left RGB", self.left_preview), 1, 0)
+        preview_layout.addWidget(self._preview_panel("Right RGB", self.right_preview), 1, 1)
         root.addLayout(preview_layout, 2)
 
         side = QVBoxLayout()
@@ -434,6 +505,17 @@ class MainWindow(QMainWindow):
         root.addLayout(side, 1)
         self.setCentralWidget(central)
 
+    def _preview_panel(self, title: str, preview: PreviewLabel) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        title_label = QLabel(title)
+        title_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout.addWidget(title_label)
+        layout.addWidget(preview, 1)
+        return panel
+
     def _connect_signals(self) -> None:
         self.choose_output_button.clicked.connect(self._choose_output)
         self.open_button.clicked.connect(lambda: self.worker and self.worker.open_device(self.build_settings()))
@@ -478,9 +560,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._append_error(str(exc))
 
-    def _update_preview(self, left_bgr: object, right_bgr: object) -> None:
+    def _update_preview(self, left_bgr: object, right_bgr: object, depth_m: object) -> None:
         self.left_preview.set_bgr_image(left_bgr if isinstance(left_bgr, np.ndarray) else None)
         self.right_preview.set_bgr_image(right_bgr if isinstance(right_bgr, np.ndarray) else None)
+        self.depth_preview.set_depth_image(depth_m if isinstance(depth_m, np.ndarray) else None)
 
     def _set_state(self, state: str) -> None:
         self.status_value.setText(state)
@@ -527,6 +610,7 @@ class MainWindow(QMainWindow):
 
 
 def run_app() -> int:
+    prepare_qt_environment()
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     window.resize(1280, 720)

@@ -1,6 +1,19 @@
 import numpy as np
 
 
+def test_sdk_mat_snapshot_returns_independent_contiguous_copy():
+    from daaam_zed.zed_capture import _sdk_mat_snapshot
+
+    source = np.arange(5 * 6 * 4, dtype=np.uint8).reshape(5, 6, 4)[:, ::2, :]
+
+    snapshot = _sdk_mat_snapshot(source)
+
+    assert snapshot.flags.c_contiguous
+    assert snapshot.shape == source.shape
+    assert not np.shares_memory(snapshot, source)
+    np.testing.assert_array_equal(snapshot, source)
+
+
 class FakeCamera:
     def __init__(self, frames):
         self.frames = list(frames)
